@@ -108,6 +108,7 @@ export default function App() {
     return saved ? JSON.parse(saved) : true;
   });
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [liveTrackingEnabled, setLiveTrackingEnabled] = useState<boolean>(true);
   const [selectedMapPoint, setSelectedMapPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [offlineQueue, setOfflineQueue] = useState<Omit<Report, 'id' | 'reportedAt' | 'votesUp' | 'votesDown' | 'status' | 'votedUsers'>[]>(() => {
@@ -195,6 +196,79 @@ export default function App() {
         }, 3000);
       }
     }
+  };
+
+  // Favorite places state and helpers
+  const [favorites, setFavorites] = useState<{ id: string; name: string; lat: number; lng: number }[]>(() => {
+    const saved = localStorage.getItem('favorite_places');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const handleSaveFavorite = (name: string, lat: number, lng: number) => {
+    const newFav = {
+      id: `fav-${Date.now()}`,
+      name: name || `Ubicación (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+      lat,
+      lng
+    };
+    const updated = [...favorites, newFav];
+    setFavorites(updated);
+    localStorage.setItem('favorite_places', JSON.stringify(updated));
+    
+    logActivity('create', `Guardó el lugar favorito: ${newFav.name}`);
+    
+    setShareToast('Lugar guardado en favoritos');
+    setTimeout(() => setShareToast(null), 3000);
+  };
+
+  const handleDeleteFavorite = (id: string) => {
+    const updated = favorites.filter(f => f.id !== id);
+    setFavorites(updated);
+    localStorage.setItem('favorite_places', JSON.stringify(updated));
+    setShareToast('Lugar eliminado de favoritos');
+    setTimeout(() => setShareToast(null), 3000);
+  };
+
+  const handleExportReportsToCSV = () => {
+    if (!user) return;
+    
+    const userReports = reports.filter(r => r.creator === user.username);
+    if (userReports.length === 0) {
+      alert('No tienes reportes creados para exportar.');
+      return;
+    }
+
+    const headers = ['ID', 'Fecha y Hora', 'Latitud', 'Longitud', 'Tipo de Control', 'Descripcion', 'Ubicacion', 'Confirmados (Si)', 'Despejados (No)', 'Estado'];
+    
+    const rows = userReports.map(r => [
+      r.id,
+      new Date(r.reportedAt).toLocaleString(),
+      r.lat,
+      r.lng,
+      r.type === 'transito' ? 'Transito' : r.type === 'policia' ? 'Policia' : 'Vialidad',
+      `"${(r.description || '').replace(/"/g, '""')}"`,
+      `"${r.locationName.replace(/"/g, '""')}"`,
+      r.votesUp || 0,
+      r.votesDown || 0,
+      r.status
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.join(','))
+    ].join('\n');
+
+    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `reportes_retenalerta_${user.username}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    setShareToast('Historial de reportes exportado con exito');
+    setTimeout(() => setShareToast(null), 3000);
   };
 
   // Push Notification Preferences State
@@ -353,8 +427,8 @@ export default function App() {
       // Add high quality tile layer with CARTO Basemaps API Key
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
-          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7',
+          ? 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
+          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7',
         {
           maxZoom: 19,
         }
@@ -382,8 +456,13 @@ export default function App() {
         }));
         setShowReportWizard(true);
       });
-    } else {
-      // If map exists, just update user view if it has changed
+
+      // If user drags the map, disable auto-centering so they can explore
+      mapRef.current.on('dragstart', () => {
+        setLiveTrackingEnabled(false);
+      });
+    } else if (liveTrackingEnabled) {
+      // If map exists and live tracking is enabled, update user view to center on them
       mapRef.current.setView([userCoords.lat, userCoords.lng]);
     }
 
@@ -412,7 +491,7 @@ export default function App() {
     // Refresh traffic stop markers
     updateMapMarkers();
 
-  }, [activeTab, userCoords, reports, selectedMapPoint, filters]);
+  }, [activeTab, userCoords, reports, selectedMapPoint, filters, liveTrackingEnabled]);
 
   // Update map tile layer style dynamically when nightMode changes
   useEffect(() => {
@@ -424,8 +503,8 @@ export default function App() {
       
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
-          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7', 
+          ? 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
+          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7', 
         {
           maxZoom: 19,
         }
@@ -1289,6 +1368,47 @@ export default function App() {
               )}
             </div>
 
+            {/* Lugares Favoritos Collapsible Card */}
+            {favorites.length > 0 && (
+              <div className={`backdrop-blur-md p-2.5 rounded-2xl shadow-2xl border pointer-events-auto flex flex-col gap-1.5 w-72 sm:w-80 transition-all duration-300 ${
+                nightMode ? 'bg-zinc-950/90 border-zinc-800' : 'bg-slate-900/90 border-slate-700/60'
+              }`}>
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">⭐ Lugares Favoritos</span>
+                  <span className="text-[9px] bg-blue-500/20 text-blue-400 font-bold px-1.5 py-0.5 rounded-full">{favorites.length}</span>
+                </div>
+                
+                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                  {favorites.map((fav) => (
+                    <div 
+                      key={fav.id}
+                      className="flex items-center justify-between gap-1 bg-slate-950/45 hover:bg-slate-950/80 rounded-xl px-2 py-1 transition text-[11px] text-slate-300 border border-slate-800/20 group animate-in fade-in zoom-in-95 duration-150"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (mapRef.current) {
+                            mapRef.current.setView([fav.lat, fav.lng], 16, { animate: true, duration: 1.5 });
+                          }
+                        }}
+                        className="text-left font-semibold truncate flex-1 hover:text-white transition cursor-pointer"
+                      >
+                        {fav.name}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteFavorite(fav.id)}
+                        className="text-slate-500 hover:text-rose-400 transition text-[10px] px-1 cursor-pointer"
+                        title="Eliminar de favoritos"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Quick Helper Banner */}
             <div className="bg-slate-900/90 backdrop-blur-md px-3 py-2 rounded-xl text-xs shadow-xl border border-slate-700/50 max-w-xs text-slate-300 pointer-events-auto">
               <div className="font-bold text-white flex items-center gap-1.5 mb-1">
@@ -1367,6 +1487,29 @@ export default function App() {
             </div>
           </div>
 
+          {/* Real-time GPS Center Button */}
+          {userCoords && (
+            <button
+              onClick={() => {
+                setLiveTrackingEnabled(true);
+                if (mapRef.current) {
+                  mapRef.current.setView([userCoords.lat, userCoords.lng], 16, { animate: true, duration: 1.5 });
+                }
+              }}
+              className={`absolute bottom-20 right-4 z-10 p-2.5 rounded-2xl shadow-2xl border transition-all pointer-events-auto flex items-center justify-center gap-1.5 active:scale-95 cursor-pointer font-bold text-xs ${
+                liveTrackingEnabled 
+                  ? 'bg-blue-600 border-blue-400 text-white shadow-blue-500/25 animate-pulse' 
+                  : nightMode 
+                    ? 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:text-white' 
+                    : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'
+              }`}
+              title={liveTrackingEnabled ? "Seguimiento en tiempo real activado" : "Centrar en mi ubicación real"}
+            >
+              <span>🧭</span>
+              <span>{liveTrackingEnabled ? "Seguimiento en Vivo" : "Centrar GPS"}</span>
+            </button>
+          )}
+
           {/* Create Point Wizard Modal Overlay */}
           {showReportWizard && (
             <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-sm flex items-center justify-center p-4 z-20">
@@ -1432,14 +1575,28 @@ export default function App() {
 
                   <div>
                     <label className="block text-xs font-bold text-slate-400 mb-1">REFERENCIA / CALLE / AV</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="Ej. Calle 45 con Av. Principal, frente al supermercado"
-                      value={reportForm.locationName}
-                      onChange={e => setReportForm(p => ({ ...p, locationName: e.target.value }))}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                    />
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        required
+                        placeholder="Ej. Calle 45 con Av. Principal, frente al supermercado"
+                        value={reportForm.locationName}
+                        onChange={e => setReportForm(p => ({ ...p, locationName: e.target.value }))}
+                        className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedMapPoint) {
+                            handleSaveFavorite(reportForm.locationName, selectedMapPoint.lat, selectedMapPoint.lng);
+                          }
+                        }}
+                        className="bg-amber-500/20 hover:bg-amber-500 text-amber-400 hover:text-slate-950 font-bold px-3 py-2 rounded-xl border border-amber-500/30 shadow-md transition shrink-0 flex items-center justify-center gap-1 cursor-pointer active:scale-95"
+                        title="Guardar como Lugar Favorito"
+                      >
+                        ⭐
+                      </button>
+                    </div>
                   </div>
 
                   <div>
@@ -1835,6 +1992,15 @@ export default function App() {
                           </p>
                         </div>
                       </div>
+
+                      {/* Export reports to CSV button */}
+                      <button
+                        onClick={handleExportReportsToCSV}
+                        className="mt-4.5 w-full bg-slate-900 hover:bg-slate-950 text-slate-300 hover:text-white border border-slate-700/60 px-4 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5 text-blue-400" />
+                        <span>Exportar mis reportes (CSV)</span>
+                      </button>
                     </div>
 
                     {/* Notification Preferences Card */}

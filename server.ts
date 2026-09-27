@@ -474,11 +474,45 @@ async function startServer() {
     }
   };
 
+  // Time-to-Live (TTL) configuration: 4 hours
+  const TTL_DURATION = 4 * 60 * 60 * 1000;
+
+  const applyReportTTL = () => {
+    try {
+      const reports = JSON.parse(fs.readFileSync(REPORTS_PATH, 'utf-8'));
+      const now = Date.now();
+      let hasChanges = false;
+
+      const updatedReports = reports.map((report: any) => {
+        if (report.status === 'Activo') {
+          const reportedTime = new Date(report.reportedAt).getTime();
+          if (now - reportedTime > TTL_DURATION) {
+            report.status = 'Despejado';
+            hasChanges = true;
+            console.log(`[TTL] Reporte ${report.id} marcado automáticamente como 'Despejado' (Expirado 4 horas).`);
+          }
+        }
+        return report;
+      });
+
+      if (hasChanges) {
+        fs.writeFileSync(REPORTS_PATH, JSON.stringify(updatedReports, null, 2));
+      }
+      return updatedReports;
+    } catch (e) {
+      console.error('Error applying report TTL:', e);
+      return [];
+    }
+  };
+
+  // Run TTL check every 5 minutes
+  setInterval(applyReportTTL, 5 * 60 * 1000);
+
   // 3. Reports Endpoints
   app.get('/api/reports', (req, res) => {
-    // Return combined reports
-    const reports = JSON.parse(fs.readFileSync(REPORTS_PATH, 'utf-8'));
-    res.json(reports);
+    // Return combined reports with TTL applied on-the-fly to guarantee freshness
+    const freshReports = applyReportTTL();
+    res.json(freshReports);
   });
 
   app.post('/api/reports', async (req, res) => {
