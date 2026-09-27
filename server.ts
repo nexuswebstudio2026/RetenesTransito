@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { google } from 'googleapis';
+import { JWT } from 'google-auth-library';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -16,6 +17,20 @@ const CONFIG_PATH = path.join(DATA_DIR, 'google_sheets_config.json');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
 const REPORTS_PATH = path.join(DATA_DIR, 'reports.json');
 const SUBSCRIPTIONS_PATH = path.join(DATA_DIR, 'subscriptions.json');
+
+// Safe JSON read helper (tolerates BOM from Windows PowerShell Set-Content)
+function readJsonFile(filePath: string, fallback: any = []) {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    let raw = fs.readFileSync(filePath, 'utf-8');
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    if (!raw.trim()) return fallback;
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error(`Error reading ${filePath}, using fallback:`, e);
+    return fallback;
+  }
+}
 
 // Ensure database files exist
 if (!fs.existsSync(USERS_PATH)) fs.writeFileSync(USERS_PATH, JSON.stringify([], null, 2));
@@ -47,12 +62,23 @@ interface ConfigType {
 }
 
 // Get Saved Config Helper
+function stripBom(s: string): string {
+  return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+}
+
+function normalizeKey(k: string): string {
+  let out = stripBom(k);
+  if (out.includes('\\n')) out = out.split('\\n').join('\n');
+  return out;
+}
+
 function getSheetsConfig(): ConfigType | null {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
-      const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+      const content = stripBom(fs.readFileSync(CONFIG_PATH, 'utf-8'));
       const config = JSON.parse(content);
       if (config.clientEmail && config.privateKey && config.sheetId) {
+        config.privateKey = normalizeKey(config.privateKey);
         return config;
       }
     }
@@ -74,13 +100,8 @@ function getSheetsConfig(): ConfigType | null {
 
 // Google Sheets Client Initializer
 function getSheetsClient(config: ConfigType) {
-  const auth = new (google.auth.JWT as any)(
-    config.clientEmail,
-    undefined,
-    config.privateKey.replace(/\\n/g, '\n'),
-    ['https://www.googleapis.com/auth/spreadsheets']
-  );
-  return google.sheets({ version: 'v4', auth });
+  const auth = new JWT({ email: config.clientEmail, key: normalizeKey(config.privateKey), scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
+  return google.sheets({ version: 'v4', auth: auth as any });
 }
 
 // Helper to append a row to Google Sheets
@@ -175,6 +196,10 @@ async function ensureSheetStructure() {
       },
       {
         title: 'Reportes',
+        headers: ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No']
+      },
+      {
+        title: 'Retenes',
         headers: ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No']
       }
     ];
@@ -300,6 +325,12 @@ async function startServer() {
 
       await syncWholeSheet(
         'Reportes',
+        ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
+        reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
+      );
+
+      await syncWholeSheet(
+        'Retenes',
         ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
         reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
       );
@@ -541,8 +572,8 @@ async function startServer() {
     reports.push(newReport);
     fs.writeFileSync(REPORTS_PATH, JSON.stringify(reports, null, 2));
 
-    // Append to sheet
-    appendToSheet('Reportes', [
+    // Append to sheets: Retenes (principal) + Reportes (histórico)
+    const retenRow = [
       newReport.id,
       newReport.reportedAt,
       newReport.creator,
@@ -554,7 +585,9 @@ async function startServer() {
       newReport.status,
       newReport.votesUp,
       newReport.votesDown
-    ]);
+    ];
+    appendToSheet('Retenes', retenRow);
+    appendToSheet('Reportes', retenRow);
 
     // Broadcast push notification
     const typeLabel = newReport.type === 'transito' ? 'Control de Tránsito' : newReport.type === 'policia' ? 'Control Policial' : 'Vialidad / Obras';
@@ -612,14 +645,13 @@ async function startServer() {
     reports[reportIndex] = report;
     fs.writeFileSync(REPORTS_PATH, JSON.stringify(reports, null, 2));
 
-    // Sync whole report sheet since columns changed
+    // Sync whole sheets (Reportes histórico + Retenes con estado) since columns changed
     const config = getSheetsConfig();
     if (config) {
-      syncWholeSheet(
-        'Reportes',
-        ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
-        reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
-      );
+      const headers = ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'];
+      const rows = reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0]);
+      syncWholeSheet('Reportes', headers, rows);
+      syncWholeSheet('Retenes', headers, rows);
 
       // Reward trustPoints to original reporter if upvoted, or reduce if marked fake
       if (voteType === 'up') {
@@ -707,11 +739,10 @@ async function startServer() {
 
     const config = getSheetsConfig();
     if (config) {
-      syncWholeSheet(
-        'Reportes',
-        ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
-        reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
-      );
+      const headers = ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'];
+      const rows = reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0]);
+      syncWholeSheet('Reportes', headers, rows);
+      syncWholeSheet('Retenes', headers, rows);
     }
 
     res.json({ success: true, report });
@@ -742,11 +773,10 @@ async function startServer() {
 
     const config = getSheetsConfig();
     if (config) {
-      syncWholeSheet(
-        'Reportes',
-        ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
-        reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
-      );
+      const headers = ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'];
+      const rows = reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0]);
+      syncWholeSheet('Reportes', headers, rows);
+      syncWholeSheet('Retenes', headers, rows);
     }
 
     res.json({ success: true, message: 'Reporte eliminado correctamente.' });

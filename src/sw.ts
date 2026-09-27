@@ -34,10 +34,13 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Cache Leaflet CDN assets and OpenStreetMap tiles
+  // Cache Leaflet CDN assets and map tiles
   if (
     url.hostname.includes('unpkg.com') || 
     url.hostname.includes('tile.openstreetmap.org') ||
+    url.hostname.includes('basemaps.cartocdn.com') ||
+    url.hostname.includes('tiles.openfreemap.org') ||
+    url.hostname.includes('server.arcgisonline.com') ||
     url.pathname.startsWith('/api/')
   ) {
     event.respondWith(

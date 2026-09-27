@@ -490,13 +490,14 @@ export default function App() {
         attributionControl: false
       }).setView([initialLat, initialLng], 14);
 
-      // Add high quality tile layer with CARTO Basemaps Fastly URLs (No API Key Required to prevent watermarks)
+      // Estilo Google-like sin API key: Esri World Street Map (gratis, estable, sin marca de agua)
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png' 
-          : 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+          ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+          : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
         {
-          maxZoom: 19,
+          maxZoom: 20,
+          attribution: '&copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom',
         }
       ).addTo(mapRef.current);
 
@@ -508,19 +509,43 @@ export default function App() {
       // Create group layer for markers
       mapMarkersGroupRef.current = L.layerGroup().addTo(mapRef.current);
 
-      // Map click event to place report marker
-      mapRef.current.on('click', (e: any) => {
-        if (!user) {
-          setAuthMode('login');
-          return;
-        }
-        const { lat, lng } = e.latlng;
+      // Pin temporal arrastrable: el usuario elige el punto exacto del retén
+      const pinIcon = L.divIcon({
+        className: 'custom-pick-marker',
+        html: `<div style="font-size:36px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6))">📍</div>`,
+        iconSize: [36, 36],
+        iconAnchor: [18, 34],
+      });
+      const pickMarker = L.marker([initialLat, initialLng], { icon: pinIcon, draggable: true, autoPan: true });
+      const syncPick = (lat: number, lng: number) => {
         setSelectedMapPoint({ lat, lng });
         setReportForm(prev => ({
           ...prev,
-          locationName: `Cerca de coordenadas (${lat.toFixed(4)}, ${lng.toFixed(4)})`
+          locationName: prev.locationName && !prev.locationName.startsWith('Cerca de coordenadas') && !prev.locationName.startsWith('Mi ubicación actual')
+            ? prev.locationName
+            : `Punto elegido en mapa (${lat.toFixed(5)}, ${lng.toFixed(5)})`
         }));
         setShowReportWizard(true);
+      };
+      pickMarker.on('dragend', () => {
+        const p = pickMarker.getLatLng();
+        syncPick(p.lat, p.lng);
+      });
+      pickMarker.addTo(mapRef.current);
+      (mapRef as any).currentPickMarker = pickMarker;
+
+      // Map click event: mueve el pin al punto tocado y abre el formulario
+      mapRef.current.on('click', (e: any) => {
+        if (!user) {
+          setAuthMode('login');
+          setAuthError('Debes iniciar sesión para elegir el punto del retén en el mapa.');
+          setActiveTab('profile');
+          return;
+        }
+        const { lat, lng } = e.latlng;
+        const pm = (mapRef as any).currentPickMarker;
+        if (pm) pm.setLatLng([lat, lng]);
+        syncPick(lat, lng);
       });
 
       // If user drags the map, disable auto-centering so they can explore
@@ -569,10 +594,11 @@ export default function App() {
       
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png' 
-          : 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/rastertiles/voyager/{z}/{x}/{y}{r}.png', 
+          ? 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+          : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', 
         {
-          maxZoom: 19,
+          maxZoom: 20,
+          attribution: '&copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom',
         }
       ).addTo(mapRef.current);
     } catch (e) {
@@ -1562,7 +1588,7 @@ export default function App() {
                   mapRef.current.setView([userCoords.lat, userCoords.lng], 16, { animate: true, duration: 1.5 });
                 }
               }}
-              className={`absolute bottom-20 right-4 z-10 p-2.5 rounded-2xl shadow-2xl border transition-all pointer-events-auto flex items-center justify-center gap-1.5 active:scale-95 cursor-pointer font-bold text-xs ${
+              className={`absolute bottom-36 right-4 z-10 p-2.5 rounded-2xl shadow-2xl border transition-all pointer-events-auto flex items-center justify-center gap-1.5 active:scale-95 cursor-pointer font-bold text-xs ${
                 liveTrackingEnabled 
                   ? 'bg-blue-600 border-blue-400 text-white shadow-blue-500/25 animate-pulse' 
                   : nightMode 
@@ -1576,11 +1602,41 @@ export default function App() {
             </button>
           )}
 
+          {/* FAB Reportar Retén — visible siempre para registrar y compartir en el mapa */}
+          <button
+            onClick={() => {
+              if (!user) {
+                setAuthMode('login');
+                setAuthError('Debes iniciar sesión para reportar un retén. Todos los usuarios registrados verán tu alerta en el mapa.');
+                setActiveTab('profile');
+                return;
+              }
+              const coords = selectedMapPoint || userCoords;
+              if (!coords) {
+                alert('Toca el mapa para elegir el punto del retén, o activa tu GPS para usar tu ubicación actual.');
+                return;
+              }
+              if (!selectedMapPoint && userCoords) {
+                setSelectedMapPoint({ lat: userCoords.lat, lng: userCoords.lng });
+                setReportForm(prev => ({
+                  ...prev,
+                  locationName: prev.locationName || `Mi ubicación actual (${userCoords.lat.toFixed(4)}, ${userCoords.lng.toFixed(4)})`
+                }));
+              }
+              setShowReportWizard(true);
+            }}
+            className="absolute bottom-20 right-4 z-10 flex items-center gap-2 bg-rose-600 hover:bg-rose-500 active:scale-95 text-white pl-4 pr-5 py-3 rounded-full font-black text-sm shadow-2xl shadow-rose-900/50 border border-rose-400/40 transition cursor-pointer"
+            title="Reportar retén de tránsito"
+          >
+            <Plus className="h-5 w-5" strokeWidth={3} />
+            🚨 Reportar Retén
+          </button>
+
           {/* Create Point Wizard Modal Overlay */}
           {showReportWizard && (
             <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-sm flex items-center justify-center p-4 z-20">
               <div className="w-full max-w-md bg-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700 animate-in fade-in zoom-in">
-                <div className="flex justify-between items-center mb-4">
+                <div className="flex justify-between items-center mb-2">
                   <div className="flex items-center gap-2">
                     <MapPin className="h-5 w-5 text-rose-500" />
                     <h3 className="text-base font-bold text-white">Reportar Punto de Control</h3>
@@ -1595,6 +1651,15 @@ export default function App() {
                     <X className="h-5 w-5" />
                   </button>
                 </div>
+
+                <p className="text-[11px] text-slate-400 mb-4 flex items-start gap-1.5 bg-slate-900/60 border border-slate-700/60 rounded-xl px-3 py-2">
+                  <span>📍</span>
+                  <span>
+                    {selectedMapPoint
+                      ? <>Punto elegido: <strong className="text-slate-200">{selectedMapPoint.lat.toFixed(5)}, {selectedMapPoint.lng.toFixed(5)}</strong>. Toca otro punto del mapa para mover el pin, o arrastra el 📍.</>
+                      : 'Toca el mapa para elegir dónde está el retén.'}
+                  </span>
+                </p>
 
                 <form onSubmit={handleCreateReport} className="space-y-4">
                   <div>
