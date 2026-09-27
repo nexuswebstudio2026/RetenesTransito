@@ -640,6 +640,44 @@ async function startServer() {
     res.json({ success: true, report });
   });
 
+  app.post('/api/reports/:id/comment', async (req, res) => {
+    const { id } = req.params;
+    const { username, text } = req.body;
+
+    if (!username || !text || !text.trim()) {
+      return res.status(400).json({ error: 'Comentario vacío o inválido.' });
+    }
+
+    try {
+      const reports = JSON.parse(fs.readFileSync(REPORTS_PATH, 'utf-8'));
+      const reportIndex = reports.findIndex((r: any) => r.id === id);
+
+      if (reportIndex === -1) {
+        return res.status(404).json({ error: 'Reporte no encontrado.' });
+      }
+
+      const report = reports[reportIndex];
+      if (!report.comments) {
+        report.comments = [];
+      }
+
+      const newComment = {
+        id: `c-${Date.now()}`,
+        creator: username,
+        commentedAt: new Date().toISOString(),
+        text: text.trim()
+      };
+
+      report.comments.push(newComment);
+      reports[reportIndex] = report;
+      fs.writeFileSync(REPORTS_PATH, JSON.stringify(reports, null, 2));
+
+      res.json({ success: true, comment: newComment });
+    } catch (e) {
+      res.status(500).json({ error: 'Error al agregar el comentario.' });
+    }
+  });
+
   app.put('/api/reports/:id', async (req, res) => {
     const { id } = req.params;
     const { type, description, locationName, username } = req.body;

@@ -51,6 +51,13 @@ interface User {
   trustPoints: number;
 }
 
+interface Comment {
+  id: string;
+  creator: string;
+  commentedAt: string;
+  text: string;
+}
+
 interface Report {
   id: string;
   reportedAt: string;
@@ -64,6 +71,7 @@ interface Report {
   votesUp: number;
   votesDown: number;
   votedUsers?: Record<string, 'up' | 'down'>;
+  comments?: Comment[];
 }
 
 interface SheetConfig {
@@ -227,6 +235,64 @@ export default function App() {
     localStorage.setItem('favorite_places', JSON.stringify(updated));
     setShareToast('Lugar eliminado de favoritos');
     setTimeout(() => setShareToast(null), 3000);
+  };
+
+  // Comments state and helper
+  const [commentText, setCommentText] = useState('');
+
+  const handlePostComment = async (reportId: string) => {
+    if (!user) {
+      setAuthMode('login');
+      return;
+    }
+    if (!commentText.trim()) return;
+
+    try {
+      const response = await fetch(`/api/reports/${reportId}/comment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          text: commentText
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        
+        // Update local state for reports
+        setReports(prev => prev.map(r => {
+          if (r.id === reportId) {
+            return {
+              ...r,
+              comments: [...(r.comments || []), data.comment]
+            };
+          }
+          return r;
+        }));
+
+        // Update selectedReport comments dynamically
+        setSelectedReport(prev => {
+          if (prev && prev.id === reportId) {
+            return {
+              ...prev,
+              comments: [...(prev.comments || []), data.comment]
+            };
+          }
+          return prev;
+        });
+
+        setCommentText('');
+        setShareToast('Comentario publicado');
+        setTimeout(() => setShareToast(null), 3000);
+      } else {
+        const errorData = await response.json();
+        alert(errorData.error || 'Error al enviar el comentario.');
+      }
+    } catch (e) {
+      console.error('Error posting comment:', e);
+      alert('Error de conexión al enviar el comentario.');
+    }
   };
 
   const handleExportReportsToCSV = () => {
@@ -424,11 +490,11 @@ export default function App() {
         attributionControl: false
       }).setView([initialLat, initialLng], 14);
 
-      // Add high quality tile layer with CARTO Basemaps API Key
+      // Add high quality tile layer with CARTO Basemaps Fastly URLs (No API Key Required to prevent watermarks)
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
-          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7',
+          ? 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png' 
+          : 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/rastertiles/voyager/{z}/{x}/{y}{r}.png',
         {
           maxZoom: 19,
         }
@@ -503,8 +569,8 @@ export default function App() {
       
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
-          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_40mh_1_7a8812fd0920afeedb04d7d7', 
+          ? 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png' 
+          : 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/rastertiles/voyager/{z}/{x}/{y}{r}.png', 
         {
           maxZoom: 19,
         }
@@ -1705,6 +1771,75 @@ export default function App() {
                     <span>No ({selectedReport.votesDown || 0})</span>
                   </button>
                 </div>
+              </div>
+
+              {/* Community Comments Section */}
+              <div className={`border-t mt-4 pt-3 flex flex-col gap-2 ${
+                nightMode ? 'border-zinc-800' : 'border-slate-700/60'
+              }`}>
+                <div className="flex justify-between items-center px-1">
+                  <span className={`text-[10px] font-black uppercase tracking-wider ${nightMode ? 'text-zinc-400' : 'text-slate-400'}`}>💬 Comentarios de la comunidad</span>
+                  <span className="text-[9px] bg-blue-500/25 text-blue-400 font-bold px-1.5 py-0.5 rounded-full">
+                    {(selectedReport.comments || []).length}
+                  </span>
+                </div>
+
+                {/* Comments List */}
+                <div className="flex flex-col gap-1.5 max-h-28 overflow-y-auto pr-1">
+                  {(selectedReport.comments || []).length === 0 ? (
+                    <p className={`text-[10px] italic px-1 ${nightMode ? 'text-zinc-500' : 'text-slate-500'}`}>
+                      No hay comentarios aún. ¡Sé el primero en informar sobre detalles!
+                    </p>
+                  ) : (
+                    (selectedReport.comments || []).map((c) => (
+                      <div 
+                        key={c.id} 
+                        className={`p-2 rounded-xl border text-[11px] ${
+                          nightMode ? 'bg-zinc-950/40 border-zinc-800/80 text-zinc-300' : 'bg-slate-900/40 border-slate-700/40 text-slate-300'
+                        }`}
+                      >
+                        <div className="flex justify-between items-center mb-0.5 font-bold">
+                          <span className="text-blue-400">@{c.creator}</span>
+                          <span className={`text-[9px] font-medium ${nightMode ? 'text-zinc-500' : 'text-slate-500'}`}>
+                            {new Date(c.commentedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <p className="font-medium break-words leading-relaxed">{c.text}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Comment Input Form */}
+                <form 
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handlePostComment(selectedReport.id);
+                  }}
+                  className="flex items-center gap-1.5 mt-1"
+                >
+                  <input
+                    type="text"
+                    required
+                    placeholder={user ? "Añadir detalles del control..." : "Inicia sesión para comentar..."}
+                    disabled={!user}
+                    value={commentText}
+                    onChange={(e) => setCommentText(e.target.value)}
+                    className={`flex-1 text-xs px-2.5 py-1.5 rounded-xl border focus:outline-none transition-colors ${
+                      nightMode 
+                        ? 'bg-zinc-950/80 border-zinc-800 text-white focus:border-blue-500' 
+                        : 'bg-slate-900/80 border-slate-700/60 text-white focus:border-blue-500'
+                    } disabled:opacity-50`}
+                  />
+                  <button
+                    type="submit"
+                    disabled={!user || !commentText.trim()}
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs p-2 rounded-xl border border-blue-500/30 transition shadow-md active:scale-95 disabled:opacity-40 cursor-pointer"
+                    title="Enviar comentario"
+                  >
+                    💬
+                  </button>
+                </form>
               </div>
             </div>
           )}
