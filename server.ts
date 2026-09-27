@@ -15,10 +15,30 @@ if (!fs.existsSync(DATA_DIR)) {
 const CONFIG_PATH = path.join(DATA_DIR, 'google_sheets_config.json');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
 const REPORTS_PATH = path.join(DATA_DIR, 'reports.json');
+const SUBSCRIPTIONS_PATH = path.join(DATA_DIR, 'subscriptions.json');
 
 // Ensure database files exist
 if (!fs.existsSync(USERS_PATH)) fs.writeFileSync(USERS_PATH, JSON.stringify([], null, 2));
 if (!fs.existsSync(REPORTS_PATH)) fs.writeFileSync(REPORTS_PATH, JSON.stringify([], null, 2));
+if (!fs.existsSync(SUBSCRIPTIONS_PATH)) fs.writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify([], null, 2));
+
+import webPush from 'web-push';
+
+const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid-keys.json');
+let vapidKeys: { publicKey: string, privateKey: string };
+
+if (fs.existsSync(VAPID_KEYS_PATH)) {
+  vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, 'utf-8'));
+} else {
+  vapidKeys = webPush.generateVAPIDKeys();
+  fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys, null, 2));
+}
+
+webPush.setVapidDetails(
+  'mailto:nexuswebstudio2026@gmail.com',
+  vapidKeys.publicKey,
+  vapidKeys.privateKey
+);
 
 interface ConfigType {
   clientEmail: string;
@@ -54,7 +74,7 @@ function getSheetsConfig(): ConfigType | null {
 
 // Google Sheets Client Initializer
 function getSheetsClient(config: ConfigType) {
-  const auth = new google.auth.JWT(
+  const auth = new (google.auth.JWT as any)(
     config.clientEmail,
     undefined,
     config.privateKey.replace(/\\n/g, '\n'),
@@ -404,6 +424,56 @@ async function startServer() {
     }
   });
 
+  // 2.5 Push Notification Endpoints
+  app.get('/api/push/public-key', (req, res) => {
+    res.json({ publicKey: vapidKeys.publicKey });
+  });
+
+  app.post('/api/push/subscribe', (req, res) => {
+    const subscription = req.body;
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ error: 'Suscripción inválida.' });
+    }
+
+    try {
+      const subs = JSON.parse(fs.readFileSync(SUBSCRIPTIONS_PATH, 'utf-8'));
+      const exists = subs.some((s: any) => s.endpoint === subscription.endpoint);
+      if (!exists) {
+        subs.push(subscription);
+        fs.writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify(subs, null, 2));
+      }
+      res.status(201).json({ success: true });
+    } catch (e) {
+      res.status(500).json({ error: 'Error al registrar suscripción.' });
+    }
+  });
+
+  // Push helper function
+  const broadcastPushNotification = async (payload: { title: string; body: string; data?: any }) => {
+    try {
+      const subs = JSON.parse(fs.readFileSync(SUBSCRIPTIONS_PATH, 'utf-8'));
+      const promises = subs.map((sub: any) => {
+        return webPush.sendNotification(sub, JSON.stringify(payload))
+          .catch((err: any) => {
+            if (err.statusCode === 410 || err.statusCode === 404) {
+              try {
+                const currentSubs = JSON.parse(fs.readFileSync(SUBSCRIPTIONS_PATH, 'utf-8'));
+                const filtered = currentSubs.filter((s: any) => s.endpoint !== sub.endpoint);
+                fs.writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify(filtered, null, 2));
+              } catch (e) {
+                console.error(e);
+              }
+            } else {
+              console.error('Error sending push to:', sub.endpoint, err);
+            }
+          });
+      });
+      await Promise.all(promises);
+    } catch (e) {
+      console.error('Error broadcasting push notification', e);
+    }
+  };
+
   // 3. Reports Endpoints
   app.get('/api/reports', (req, res) => {
     // Return combined reports
@@ -451,6 +521,14 @@ async function startServer() {
       newReport.votesUp,
       newReport.votesDown
     ]);
+
+    // Broadcast push notification
+    const typeLabel = newReport.type === 'transito' ? 'Control de Tránsito' : newReport.type === 'policia' ? 'Control Policial' : 'Vialidad / Obras';
+    broadcastPushNotification({
+      title: '🚨 Nuevo Retén Alertado',
+      body: `Un ciudadano reportó: ${newReport.locationName} (${typeLabel})`,
+      data: { url: '/' }
+    });
 
     res.json({ success: true, report: newReport });
   });

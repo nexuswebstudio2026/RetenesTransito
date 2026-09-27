@@ -26,7 +26,8 @@ import {
   Moon,
   Sun,
   Share2,
-  Activity
+  Activity,
+  Search
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -142,6 +143,59 @@ export default function App() {
     return saved ? false : true;
   });
   const [guideStep, setGuideStep] = useState<number>(1);
+
+  // Geocoding Search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<{ lat: string; lon: string; display_name: string }[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const handleGeocodingSearch = async (query: string) => {
+    if (!query.trim()) return;
+    setIsSearching(true);
+    setSearchError(null);
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResults(data);
+        if (data.length === 0) {
+          setSearchError('No se encontraron resultados.');
+        }
+      } else {
+        setSearchError('Error en el servicio de búsqueda.');
+      }
+    } catch (e) {
+      console.error(e);
+      setSearchError('Error de red al buscar.');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSelectLocation = (lat: number, lon: number, displayName: string) => {
+    if (mapRef.current) {
+      mapRef.current.setView([lat, lon], 16, { animate: true, duration: 1.5 });
+      setSearchResults([]);
+      setSearchQuery(displayName);
+
+      const L = (window as any).L;
+      if (L) {
+        const searchHighlight = L.circle([lat, lon], {
+          color: '#3b82f6',
+          fillColor: '#3b82f6',
+          fillOpacity: 0.2,
+          radius: 100
+        }).addTo(mapRef.current);
+
+        setTimeout(() => {
+          if (mapRef.current && searchHighlight) {
+            mapRef.current.removeLayer(searchHighlight);
+          }
+        }, 3000);
+      }
+    }
+  };
 
   // Push Notification Preferences State
   const [notifDistance, setNotifDistance] = useState<number>(() => {
@@ -266,9 +320,11 @@ export default function App() {
       if (Notification.permission === 'granted' && proximityAlert?.id !== closeReport.id) {
         new Notification('¡Alerta de Control Vial Cerca!', {
           body: `Se reportó un retén tipo: ${getReportLabel(closeReport.type)} en ${closeReport.locationName}. ¡Conduce con precaución!`,
-          icon: '/icon.svg',
-          vibrate: [200, 100, 200]
+          icon: '/icon.svg'
         });
+        if ('vibrate' in navigator) {
+          navigator.vibrate([200, 100, 200]);
+        }
       }
     } else {
       setProximityAlert(null);
@@ -294,11 +350,11 @@ export default function App() {
         attributionControl: false
       }).setView([initialLat, initialLng], 14);
 
-      // Add high quality tile layer
+      // Add high quality tile layer with CARTO Basemaps API Key
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' 
-          : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
+          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7',
         {
           maxZoom: 19,
         }
@@ -368,8 +424,8 @@ export default function App() {
       
       tileLayerRef.current = L.tileLayer(
         nightMode 
-          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' 
-          : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', 
+          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7' 
+          : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?api_key=cb1_40mh_1_7a8812fd0920afeedb04d7d7', 
         {
           maxZoom: 19,
         }
@@ -505,11 +561,65 @@ export default function App() {
     }
   };
 
+  // Helper to convert base64 VAPID key
+  const urlB64ToUint8Array = (base64String: string) => {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding)
+      .replace(/\-/g, '+')
+      .replace(/_/g, '/');
+
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  };
+
+  // Push subscription flow
+  const subscribeToPushNotifications = async (registration: ServiceWorkerRegistration) => {
+    try {
+      // Fetch VAPID public key
+      const keyRes = await fetch('/api/push/public-key');
+      const { publicKey } = await keyRes.json();
+      if (!publicKey) return;
+
+      const applicationServerKey = urlB64ToUint8Array(publicKey);
+      
+      // Subscribe user
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey
+      });
+
+      console.log('Subscribed user successfully:', subscription);
+
+      // Save subscription payload to backend
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(subscription)
+      });
+    } catch (err) {
+      console.error('Failed to subscribe user to push notifications', err);
+    }
+  };
+
   // Native Notification permissions request
   const requestNotificationPermission = async () => {
-    if ('Notification' in window) {
+    if ('Notification' in window && 'serviceWorker' in navigator) {
       const permission = await Notification.requestPermission();
       setNotificationsEnabled(permission === 'granted');
+      
+      if (permission === 'granted') {
+        try {
+          const registration = await navigator.serviceWorker.ready;
+          await subscribeToPushNotifications(registration);
+        } catch (e) {
+          console.error('Error on service worker registration ready', e);
+        }
+      }
     }
   };
 
@@ -958,6 +1068,63 @@ export default function App() {
           </div>
         </div>
 
+        {/* Desktop Navigation Tabs */}
+        <div className="hidden md:flex items-center gap-1 bg-slate-900/40 p-1 rounded-xl border border-slate-700/50">
+          <button
+            onClick={() => setActiveTab('map')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition flex items-center gap-1.5 ${
+              activeTab === 'map' 
+                ? 'bg-blue-600 text-white shadow-md' 
+                : 'text-slate-400 hover:text-white hover:bg-slate-700/40'
+            }`}
+          >
+            <MapIcon className="h-3.5 w-3.5" />
+            <span>Mapa</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('alerts')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition flex items-center gap-1.5 ${
+              activeTab === 'alerts' 
+                ? 'bg-blue-600 text-white shadow-md' 
+                : 'text-slate-400 hover:text-white hover:bg-slate-700/40'
+            }`}
+          >
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+            <span>Lista</span>
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('stats');
+              fetchLeaderboard();
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition flex items-center gap-1.5 ${
+              activeTab === 'stats' 
+                ? 'bg-blue-600 text-white shadow-md' 
+                : 'text-slate-400 hover:text-white hover:bg-slate-700/40'
+            }`}
+          >
+            <BarChart3 className="h-3.5 w-3.5 text-blue-400" />
+            <span>Estadísticas</span>
+          </button>
+          <button
+            onClick={() => {
+              if (!user) {
+                setAuthMode('login');
+              } else {
+                setActiveTab('profile');
+              }
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition flex items-center gap-1.5 ${
+              activeTab === 'profile' 
+                ? 'bg-blue-600 text-white shadow-md' 
+                : 'text-slate-400 hover:text-white hover:bg-slate-700/40'
+            }`}
+          >
+            <UserIcon className="h-3.5 w-3.5" />
+            <span>Mi Cuenta</span>
+          </button>
+        </div>
+
         <div className="flex items-center gap-2">
           {/* Status Display */}
           <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400">
@@ -1054,6 +1221,74 @@ export default function App() {
 
           {/* Map Controls & Helpers */}
           <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 pointer-events-none">
+            {/* Geocoding Search Bar */}
+            <div className={`backdrop-blur-md p-2 rounded-2xl shadow-2xl border pointer-events-auto flex flex-col gap-1.5 w-72 sm:w-80 transition-all duration-300 ${
+              nightMode ? 'bg-zinc-950/90 border-zinc-800' : 'bg-slate-900/90 border-slate-700/60'
+            }`}>
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleGeocodingSearch(searchQuery);
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      if (!e.target.value) setSearchResults([]);
+                    }}
+                    placeholder="Buscar dirección o barrio..."
+                    className="w-full bg-slate-950/80 text-white text-xs px-3 py-2 pl-8 rounded-xl border border-slate-700/50 focus:outline-none focus:border-blue-500 placeholder-slate-400 font-medium"
+                  />
+                  <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setSearchResults([]);
+                        setSearchError(null);
+                      }}
+                      className="absolute right-2.5 top-1 text-slate-400 hover:text-white text-base font-bold font-mono"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="submit"
+                  disabled={isSearching}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-2 rounded-xl border border-blue-500/30 shadow-md transition shrink-0 active:scale-95 disabled:opacity-50"
+                >
+                  {isSearching ? '...' : 'Buscar'}
+                </button>
+              </form>
+
+              {/* Suggestions dropdown */}
+              {searchResults.length > 0 && (
+                <div className="bg-slate-950/95 border border-slate-800 rounded-xl overflow-hidden max-h-48 overflow-y-auto mt-1 divide-y divide-slate-800/60 shadow-2xl">
+                  {searchResults.map((result, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => handleSelectLocation(Number(result.lat), Number(result.lon), result.display_name)}
+                      className="w-full text-left px-3 py-2 text-[11px] text-slate-300 hover:bg-blue-600/20 hover:text-white transition font-medium leading-tight"
+                    >
+                      📍 {result.display_name}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Error state */}
+              {searchError && (
+                <p className="text-[10px] text-rose-400 font-bold px-1.5">{searchError}</p>
+              )}
+            </div>
+
             {/* Quick Helper Banner */}
             <div className="bg-slate-900/90 backdrop-blur-md px-3 py-2 rounded-xl text-xs shadow-xl border border-slate-700/50 max-w-xs text-slate-300 pointer-events-auto">
               <div className="font-bold text-white flex items-center gap-1.5 mb-1">
@@ -1320,7 +1555,7 @@ export default function App() {
 
         {/* RECENT ALERTS FEED TAB (Mobile / Sidebar Layout) */}
         <div className={`w-full md:w-96 md:border-l flex flex-col shrink-0 min-h-0 transition-colors duration-300 ${
-          activeTab !== 'map' ? 'flex' : 'hidden md:flex'
+          activeTab !== 'map' ? 'flex' : 'hidden'
         } ${
           nightMode ? 'border-zinc-800/80 bg-zinc-950' : 'border-slate-700/80 bg-slate-900'
         }`}>
