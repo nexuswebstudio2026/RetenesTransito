@@ -1,0 +1,6 @@
+{
+  "name": "RetenAlerta",
+  "description": "Una aplicación web progresiva (PWA) interactiva para alertar y reportar retenes de tránsito y controles policiales en tiempo real, con funcionamiento sin conexión y sincronización en Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
