@@ -25,7 +25,8 @@ import {
   BarChart3,
   Moon,
   Sun,
-  Share2
+  Share2,
+  Activity
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -154,6 +155,35 @@ export default function App() {
 
   // Community leaderboard state
   const [leaderboard, setLeaderboard] = useState<{ name: string, username: string, trustPoints: number }[]>([]);
+
+  // User activity timeline state
+  const [userActivities, setUserActivities] = useState<{ id: string, type: 'create' | 'vote' | 'edit' | 'delete', message: string, timestamp: number }[]>([]);
+
+  useEffect(() => {
+    if (user) {
+      const saved = localStorage.getItem(`activities_${user.username}`);
+      setUserActivities(saved ? JSON.parse(saved) : []);
+    } else {
+      setUserActivities([]);
+    }
+  }, [user]);
+
+  const logActivity = (type: 'create' | 'vote' | 'edit' | 'delete', message: string, customUsername?: string) => {
+    const targetUsername = customUsername || user?.username;
+    if (!targetUsername) return;
+    const key = `activities_${targetUsername}`;
+    const newActivity = {
+      id: `act-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      type,
+      message,
+      timestamp: Date.now()
+    };
+    const saved = localStorage.getItem(key);
+    const list = saved ? JSON.parse(saved) : [];
+    const updated = [newActivity, ...list].slice(0, 30);
+    localStorage.setItem(key, JSON.stringify(updated));
+    setUserActivities(updated);
+  };
 
   useEffect(() => {
     localStorage.setItem('notif_distance', notifDistance.toString());
@@ -626,6 +656,8 @@ export default function App() {
       };
       setReports(prev => [tempReport, ...prev]);
       
+      logActivity('create', `Creado reporte (Sin Conexión) en: ${queuedReport.locationName}`);
+
       setShowReportWizard(false);
       setSelectedMapPoint(null);
       setReportForm({ type: 'transito', description: '', locationName: '' });
@@ -643,6 +675,7 @@ export default function App() {
 
       if (res.ok) {
         setReports(prev => [data.report, ...prev]);
+        logActivity('create', `Creado reporte de retén en: ${data.report.locationName}`);
         setShowReportWizard(false);
         setSelectedMapPoint(null);
         setReportForm({ type: 'transito', description: '', locationName: '' });
@@ -702,6 +735,8 @@ export default function App() {
       if (res.ok) {
         setReports(prev => prev.map(r => r.id === id ? data.report : r));
         setSelectedReport(data.report);
+        const voteLabel = voteType === 'up' ? 'Confirmaste la presencia de' : 'Reportaste despejado';
+        logActivity('vote', `${voteLabel}: ${data.report.locationName}`);
         fetchLeaderboard();
       } else {
         alert(data.error || 'No se pudo registrar el voto.');
@@ -737,6 +772,7 @@ export default function App() {
       if (res.ok) {
         setReports(prev => prev.map(r => r.id === id ? data.report : r));
         setEditingReportId(null);
+        logActivity('edit', `Editaste los detalles del reporte: ${data.report.locationName}`);
         setShareToast('¡Reporte editado y sincronizado correctamente con Google Sheets!');
         setTimeout(() => setShareToast(null), 4000);
       } else {
@@ -766,6 +802,7 @@ export default function App() {
         if (selectedReport?.id === id) {
           setSelectedReport(null);
         }
+        logActivity('delete', 'Eliminaste uno de tus reportes permanentemente.');
         setShareToast('Reporte eliminado correctamente.');
         setTimeout(() => setShareToast(null), 4000);
       } else {
@@ -1631,6 +1668,60 @@ export default function App() {
                           </div>
                         </div>
                       </div>
+                    </div>
+
+                    {/* Actividad Reciente - Cronológica */}
+                    <div className={`p-5 rounded-2xl border transition-colors duration-300 ${
+                      nightMode ? 'bg-zinc-900/60 border-zinc-800' : 'bg-slate-800/80 border-slate-700 shadow-lg'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-4">
+                        <Activity className="h-4.5 w-4.5 text-blue-400" />
+                        <h4 className="text-xs font-bold text-white uppercase tracking-wider">Actividad Reciente</h4>
+                      </div>
+
+                      {userActivities.length === 0 ? (
+                        <p className="text-[11px] text-slate-500 text-center py-4">
+                          No tienes eventos recientes registrados en tu historial.
+                        </p>
+                      ) : (
+                        <div className="relative border-l-2 border-slate-700/60 ml-2.5 pl-4.5 space-y-4">
+                          {userActivities.map((act) => {
+                            let iconEmoji = '🔵';
+                            let iconBg = 'bg-blue-500/10 border-blue-500/20 text-blue-400';
+                            
+                            if (act.type === 'create') {
+                              iconEmoji = '🚨';
+                              iconBg = 'bg-rose-500/10 border-rose-500/20 text-rose-400';
+                            } else if (act.type === 'vote') {
+                              iconEmoji = '✔️';
+                              iconBg = 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400';
+                            } else if (act.type === 'edit') {
+                              iconEmoji = '✏️';
+                              iconBg = 'bg-amber-500/10 border-amber-500/20 text-amber-400';
+                            } else if (act.type === 'delete') {
+                              iconEmoji = '🗑️';
+                              iconBg = 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400';
+                            }
+
+                            return (
+                              <div key={act.id} className="relative flex flex-col gap-1 text-left">
+                                {/* Timeline Dot */}
+                                <div className={`absolute -left-[27.5px] top-0.5 h-5 w-5 rounded-full flex items-center justify-center text-[10px] border ${iconBg}`}>
+                                  {iconEmoji}
+                                </div>
+                                <div className="flex justify-between items-start gap-1">
+                                  <span className="text-xs text-slate-200 font-medium leading-tight">
+                                    {act.message}
+                                  </span>
+                                  <span className="text-[9px] text-slate-500 font-mono shrink-0">
+                                    {new Date(act.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
 
                     {/* Contribution activity */}
