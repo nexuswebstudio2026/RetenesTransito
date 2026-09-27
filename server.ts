@@ -200,12 +200,30 @@ async function startServer() {
 
   // 1. Config Endpoints
   app.get('/api/config', (req, res) => {
-    const config = getSheetsConfig();
+    let clientEmail = '';
+    let sheetId = '';
+    let hasPrivateKey = false;
+    let isConfigured = false;
+
+    try {
+      if (fs.existsSync(CONFIG_PATH)) {
+        const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+        const config = JSON.parse(content);
+        clientEmail = config.clientEmail || '';
+        sheetId = config.sheetId || '';
+        hasPrivateKey = !!config.privateKey;
+        isConfigured = !!(config.clientEmail && config.privateKey && config.sheetId);
+      }
+    } catch (e) {
+      console.error('Error parsing config file on GET', e);
+    }
+
     res.json({
-      isConfigured: !!config,
-      clientEmail: config?.clientEmail || '',
-      sheetId: config?.sheetId || '',
-      sheetLink: config?.sheetId ? `https://docs.google.com/spreadsheets/d/${config.sheetId}` : ''
+      isConfigured,
+      clientEmail,
+      sheetId,
+      hasPrivateKey,
+      sheetLink: sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}` : ''
     });
   });
 
@@ -217,9 +235,22 @@ async function startServer() {
     }
 
     try {
-      const formattedPrivateKey = privateKey.includes('-----BEGIN PRIVATE KEY-----') 
-        ? privateKey 
-        : `-----BEGIN PRIVATE KEY-----\n${privateKey}\n-----END PRIVATE KEY-----`;
+      let finalPrivateKey = privateKey;
+      
+      if (privateKey === 'Preconfigurada_No_Es_Necesario_Modificar') {
+        // Read existing private key from config file
+        if (fs.existsSync(CONFIG_PATH)) {
+          const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+          const existing = JSON.parse(content);
+          finalPrivateKey = existing.privateKey;
+        } else {
+          return res.status(400).json({ error: 'La llave privada preconfigurada no fue encontrada. Por favor ingresa una llave válida.' });
+        }
+      }
+
+      const formattedPrivateKey = finalPrivateKey.includes('-----BEGIN PRIVATE KEY-----') 
+        ? finalPrivateKey 
+        : `-----BEGIN PRIVATE KEY-----\n${finalPrivateKey}\n-----END PRIVATE KEY-----`;
 
       const newConfig: ConfigType = {
         clientEmail,
@@ -257,7 +288,7 @@ async function startServer() {
     } catch (error: any) {
       console.error('Error testing/saving sheets config:', error);
       res.status(400).json({ 
-        error: 'No se pudo conectar a Google Sheets. Verifica las credenciales, el ID de la hoja y que hayas compartido la hoja con el correo de la Cuenta de Servicio.',
+        error: 'No se pudo conectar a Google Sheets. Verifica que hayas compartido la hoja con el correo de la Cuenta de Servicio con permisos de Editor y que el ID de la hoja sea correcto.',
         details: error.message 
       });
     }
@@ -266,7 +297,15 @@ async function startServer() {
   app.post('/api/config/test', async (req, res) => {
     const { clientEmail, privateKey, sheetId } = req.body;
     try {
-      const sheets = getSheetsClient({ clientEmail, privateKey, sheetId });
+      let finalPrivateKey = privateKey;
+      if (privateKey === 'Preconfigurada_No_Es_Necesario_Modificar') {
+        if (fs.existsSync(CONFIG_PATH)) {
+          const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+          const existing = JSON.parse(content);
+          finalPrivateKey = existing.privateKey;
+        }
+      }
+      const sheets = getSheetsClient({ clientEmail, privateKey: finalPrivateKey, sheetId });
       await sheets.spreadsheets.get({ spreadsheetId: sheetId });
       res.json({ success: true });
     } catch (error: any) {
@@ -346,6 +385,23 @@ async function startServer() {
         trustPoints: user.trustPoints || 10
       }
     });
+  });
+
+  app.get('/api/users/leaderboard', (req, res) => {
+    try {
+      const users = JSON.parse(fs.readFileSync(USERS_PATH, 'utf-8'));
+      const leaderboard = users
+        .map((u: any) => ({
+          name: u.name,
+          username: u.username,
+          trustPoints: u.trustPoints !== undefined ? u.trustPoints : 10
+        }))
+        .sort((a: any, b: any) => b.trustPoints - a.trustPoints)
+        .slice(0, 10);
+      res.json(leaderboard);
+    } catch (e) {
+      res.status(500).json({ error: 'Error al obtener la tabla de líderes.' });
+    }
   });
 
   // 3. Reports Endpoints
@@ -470,6 +526,80 @@ async function startServer() {
     }
 
     res.json({ success: true, report });
+  });
+
+  app.put('/api/reports/:id', async (req, res) => {
+    const { id } = req.params;
+    const { type, description, locationName, username } = req.body;
+
+    if (!username) {
+      return res.status(401).json({ error: 'Debes iniciar sesión para editar un reporte.' });
+    }
+
+    const reports = JSON.parse(fs.readFileSync(REPORTS_PATH, 'utf-8'));
+    const reportIndex = reports.findIndex((r: any) => r.id === id);
+
+    if (reportIndex === -1) {
+      return res.status(404).json({ error: 'Reporte no encontrado.' });
+    }
+
+    const report = reports[reportIndex];
+    if (report.creator !== username) {
+      return res.status(403).json({ error: 'No tienes permiso para editar este reporte.' });
+    }
+
+    if (type) report.type = type;
+    if (description !== undefined) report.description = description;
+    if (locationName) report.locationName = locationName;
+
+    reports[reportIndex] = report;
+    fs.writeFileSync(REPORTS_PATH, JSON.stringify(reports, null, 2));
+
+    const config = getSheetsConfig();
+    if (config) {
+      syncWholeSheet(
+        'Reportes',
+        ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
+        reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
+      );
+    }
+
+    res.json({ success: true, report });
+  });
+
+  app.post('/api/reports/:id/delete', async (req, res) => {
+    const { id } = req.params;
+    const { username } = req.body;
+
+    if (!username) {
+      return res.status(401).json({ error: 'Debes iniciar sesión para eliminar un reporte.' });
+    }
+
+    const reports = JSON.parse(fs.readFileSync(REPORTS_PATH, 'utf-8'));
+    const reportIndex = reports.findIndex((r: any) => r.id === id);
+
+    if (reportIndex === -1) {
+      return res.status(404).json({ error: 'Reporte no encontrado.' });
+    }
+
+    const report = reports[reportIndex];
+    if (report.creator !== username) {
+      return res.status(403).json({ error: 'No tienes permiso para eliminar este reporte.' });
+    }
+
+    reports.splice(reportIndex, 1);
+    fs.writeFileSync(REPORTS_PATH, JSON.stringify(reports, null, 2));
+
+    const config = getSheetsConfig();
+    if (config) {
+      syncWholeSheet(
+        'Reportes',
+        ['ID', 'Fecha de Reporte', 'Usuario Creador', 'Latitud', 'Longitud', 'Tipo de Reten', 'Descripcion', 'Ubicacion Aproximada', 'Estado', 'Votos Si', 'Votos No'],
+        reports.map((r: any) => [r.id, r.reportedAt, r.creator, r.lat, r.lng, r.type, r.description, r.locationName, r.status, r.votesUp || 0, r.votesDown || 0])
+      );
+    }
+
+    res.json({ success: true, message: 'Reporte eliminado correctamente.' });
   });
 
   // Serve static UI assets

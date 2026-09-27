@@ -22,7 +22,10 @@ import {
   Lock,
   ThumbsUp,
   Map as MapIcon,
-  BarChart3
+  BarChart3,
+  Moon,
+  Sun,
+  Share2
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -95,8 +98,13 @@ export default function App() {
 
   // Map and location state
   const mapRef = useRef<any>(null);
+  const tileLayerRef = useRef<any>(null);
   const mapMarkersGroupRef = useRef<any>(null);
   const userMarkerRef = useRef<any>(null);
+  const [nightMode, setNightMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem('night_mode');
+    return saved ? JSON.parse(saved) : true;
+  });
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [selectedMapPoint, setSelectedMapPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
@@ -113,17 +121,60 @@ export default function App() {
     locationName: ''
   });
 
+  // Editing state for user's own reports
+  const [editingReportId, setEditingReportId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({
+    type: 'transito' as 'transito' | 'policia' | 'vialidad',
+    description: '',
+    locationName: ''
+  });
+
   // UI tabs/panels
   const [activeTab, setActiveTab] = useState<'map' | 'alerts' | 'profile' | 'stats'>('map');
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [proximityAlert, setProximityAlert] = useState<Report | null>(null);
+  const [shareToast, setShareToast] = useState<string | null>(null);
+  const [showQuickGuide, setShowQuickGuide] = useState<boolean>(() => {
+    const saved = localStorage.getItem('has_seen_guide');
+    return saved ? false : true;
+  });
+  const [guideStep, setGuideStep] = useState<number>(1);
+
+  // Push Notification Preferences State
+  const [notifDistance, setNotifDistance] = useState<number>(() => {
+    const saved = localStorage.getItem('notif_distance');
+    return saved ? parseFloat(saved) : 1.5;
+  });
+  const [notifTypes, setNotifTypes] = useState<{ transito: boolean, policia: boolean, vialidad: boolean }>(() => {
+    const saved = localStorage.getItem('notif_types');
+    return saved ? JSON.parse(saved) : { transito: true, policia: true, vialidad: true };
+  });
+
+  // Community leaderboard state
+  const [leaderboard, setLeaderboard] = useState<{ name: string, username: string, trustPoints: number }[]>([]);
+
+  useEffect(() => {
+    localStorage.setItem('notif_distance', notifDistance.toString());
+  }, [notifDistance]);
+
+  useEffect(() => {
+    localStorage.setItem('notif_types', JSON.stringify(notifTypes));
+  }, [notifTypes]);
+
+  // Visualization filters state
+  const [filters, setFilters] = useState({
+    transito: true,
+    policia: true,
+    vialidad: true
+  });
 
   // Load configuration and reports on boot
   useEffect(() => {
     fetchConfig();
     fetchReports();
+    fetchLeaderboard();
     requestNotificationPermission();
 
     // Set up location watching
@@ -167,11 +218,16 @@ export default function App() {
   useEffect(() => {
     if (!userCoords || reports.length === 0) return;
 
-    // Find active reports closer than 1.5 km
+    // Find active reports closer than user preference range
     const closeReport = reports.find((report) => {
       if (report.status !== 'Activo') return false;
+      
+      // Filter by type preference
+      const isAllowed = notifTypes[report.type as 'transito' | 'policia' | 'vialidad'];
+      if (!isAllowed) return false;
+
       const dist = calculateDistance(userCoords.lat, userCoords.lng, report.lat, report.lng);
-      return dist <= 1.5; // 1.5 km proximity alert
+      return dist <= notifDistance; // User configured proximity alert distance
     });
 
     if (closeReport) {
@@ -187,7 +243,7 @@ export default function App() {
     } else {
       setProximityAlert(null);
     }
-  }, [userCoords, reports]);
+  }, [userCoords, reports, notifDistance, notifTypes]);
 
   // Initialize/Update Leaflet map
   useEffect(() => {
@@ -208,10 +264,15 @@ export default function App() {
         attributionControl: false
       }).setView([initialLat, initialLng], 14);
 
-      // Add high quality tile layer (OSM)
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-      }).addTo(mapRef.current);
+      // Add high quality tile layer
+      tileLayerRef.current = L.tileLayer(
+        nightMode 
+          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' 
+          : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {
+          maxZoom: 19,
+        }
+      ).addTo(mapRef.current);
 
       // Add zoom control at bottom right
       L.control.zoom({
@@ -265,7 +326,28 @@ export default function App() {
     // Refresh traffic stop markers
     updateMapMarkers();
 
-  }, [activeTab, userCoords, reports, selectedMapPoint]);
+  }, [activeTab, userCoords, reports, selectedMapPoint, filters]);
+
+  // Update map tile layer style dynamically when nightMode changes
+  useEffect(() => {
+    const L = (window as any).L;
+    if (!L || !mapRef.current || !tileLayerRef.current) return;
+
+    try {
+      mapRef.current.removeLayer(tileLayerRef.current);
+      
+      tileLayerRef.current = L.tileLayer(
+        nightMode 
+          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' 
+          : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', 
+        {
+          maxZoom: 19,
+        }
+      ).addTo(mapRef.current);
+    } catch (e) {
+      console.error('Error switching map tile layers:', e);
+    }
+  }, [nightMode]);
 
   // Recalculate distance between two coordinates
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
@@ -280,6 +362,38 @@ export default function App() {
         Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
+  };
+
+  const handleShareReport = async (report: Report) => {
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${report.lat},${report.lng}`;
+    const shareText = `🚨 ¡Alerta de Control Vial! Se reportó un ${getReportLabel(report.type)} en: ${report.locationName}. Conduce con precaución. Ubicación exacta en el mapa: ${mapsUrl}`;
+    
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Alerta de Control Vial - RetenAlerta',
+          text: `Se reportó un ${getReportLabel(report.type)} en: ${report.locationName}. ¡Conduce con precaución!`,
+          url: mapsUrl
+        });
+      } catch (err) {
+        if ((err as any).name !== 'AbortError') {
+          copyToClipboardFallback(shareText);
+        }
+      }
+    } else {
+      copyToClipboardFallback(shareText);
+    }
+  };
+
+  const copyToClipboardFallback = (text: string) => {
+    navigator.clipboard.writeText(text)
+      .then(() => {
+        setShareToast('¡Enlace copiado al portapapeles! Listo para pegar y compartir.');
+        setTimeout(() => setShareToast(null), 4000);
+      })
+      .catch((err) => {
+        console.error('Failed to copy text:', err);
+      });
   };
 
   const getReportLabel = (type: string) => {
@@ -310,6 +424,7 @@ export default function App() {
 
     reports.forEach((report) => {
       if (report.status !== 'Activo') return;
+      if (!filters[report.type as keyof typeof filters]) return;
 
       const markerHtml = `
         <div class="relative flex items-center justify-center">
@@ -374,11 +489,11 @@ export default function App() {
       const res = await fetch('/api/config');
       const data = await res.json();
       setConfig(data);
-      if (data.isConfigured) {
+      if (data.clientEmail || data.hasPrivateKey) {
         setConfigForm({
-          clientEmail: data.clientEmail,
-          privateKey: '***********************', // obfuscated placeholder
-          sheetId: data.sheetId
+          clientEmail: data.clientEmail || '',
+          privateKey: data.hasPrivateKey ? 'Preconfigurada_No_Es_Necesario_Modificar' : '',
+          sheetId: data.sheetId || ''
         });
       }
     } catch (e) {
@@ -394,6 +509,19 @@ export default function App() {
       setReports(data);
     } catch (e) {
       console.error('Error fetching traffic stop reports', e);
+    }
+  };
+
+  // Fetch Leaderboard
+  const fetchLeaderboard = async () => {
+    try {
+      const res = await fetch('/api/users/leaderboard');
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setLeaderboard(data);
+      }
+    } catch (e) {
+      console.error('Error fetching community leaderboard', e);
     }
   };
 
@@ -574,11 +702,77 @@ export default function App() {
       if (res.ok) {
         setReports(prev => prev.map(r => r.id === id ? data.report : r));
         setSelectedReport(data.report);
+        fetchLeaderboard();
       } else {
         alert(data.error || 'No se pudo registrar el voto.');
       }
     } catch (e) {
       alert('Error al emitir el voto.');
+    }
+  };
+
+  // Start editing a report
+  const handleStartEdit = (report: Report) => {
+    setEditingReportId(report.id);
+    setEditForm({
+      type: report.type as 'transito' | 'policia' | 'vialidad',
+      description: report.description || '',
+      locationName: report.locationName
+    });
+  };
+
+  // Save edited report
+  const handleSaveEdit = async (id: string) => {
+    if (!user) return;
+    try {
+      const res = await fetch(`/api/reports/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...editForm,
+          username: user.username
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setReports(prev => prev.map(r => r.id === id ? data.report : r));
+        setEditingReportId(null);
+        setShareToast('¡Reporte editado y sincronizado correctamente con Google Sheets!');
+        setTimeout(() => setShareToast(null), 4000);
+      } else {
+        alert(data.error || 'No se pudo editar el reporte.');
+      }
+    } catch (e) {
+      alert('Error de conexión al editar el reporte.');
+    }
+  };
+
+  // Delete a report
+  const handleDeleteReport = async (id: string) => {
+    if (!user) return;
+    if (!confirm('¿Estás seguro de que deseas eliminar este reporte permanentemente? Se borrará también de Google Sheets.')) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/reports/${id}/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setReports(prev => prev.filter(r => r.id !== id));
+        if (selectedReport?.id === id) {
+          setSelectedReport(null);
+        }
+        setShareToast('Reporte eliminado correctamente.');
+        setTimeout(() => setShareToast(null), 4000);
+      } else {
+        alert(data.error || 'No se pudo eliminar el reporte.');
+      }
+    } catch (e) {
+      alert('Error al conectar con el servidor.');
     }
   };
 
@@ -664,7 +858,17 @@ export default function App() {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-screen relative overflow-hidden bg-slate-900">
+    <div className={`flex-1 flex flex-col min-h-screen relative overflow-hidden transition-colors duration-300 ${
+      nightMode ? 'bg-zinc-950 text-zinc-100' : 'bg-slate-900 text-slate-100'
+    }`}>
+      
+      {/* Share Toast Notification Banner */}
+      {shareToast && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top duration-300 max-w-sm border border-emerald-500/30">
+          <Check className="h-5 w-5 shrink-0 bg-white/20 p-1 rounded-full text-white" />
+          <span className="text-xs font-bold">{shareToast}</span>
+        </div>
+      )}
       
       {/* Offline Alert Banner */}
       {!isOnline && (
@@ -701,7 +905,9 @@ export default function App() {
       )}
 
       {/* Main Header */}
-      <header className="bg-slate-800/90 border-b border-slate-700/80 px-4 py-3 flex items-center justify-between z-30 shadow-lg">
+      <header className={`border-b px-4 py-3 flex items-center justify-between z-30 shadow-lg transition-colors duration-300 ${
+        nightMode ? 'bg-zinc-900/95 border-zinc-800/80' : 'bg-slate-800/90 border-slate-700/80'
+      }`}>
         <div className="flex items-center gap-2">
           <div className="bg-blue-600 p-2 rounded-xl border border-white/20 shadow-md text-white">
             <AlertTriangle className="h-5 w-5 text-amber-300" />
@@ -748,6 +954,21 @@ export default function App() {
               <span>Instalar iOS</span>
             </button>
           )}
+
+          {/* Night Mode Toggle Button */}
+          <button 
+            onClick={() => {
+              setNightMode(prev => {
+                const next = !prev;
+                localStorage.setItem('night_mode', JSON.stringify(next));
+                return next;
+              });
+            }}
+            className="p-2 rounded-lg text-slate-400 hover:bg-slate-700/60 hover:text-white transition"
+            title={nightMode ? "Activar Modo Día" : "Activar Modo Nocturno"}
+          >
+            {nightMode ? <Sun className="h-4 w-4 text-amber-400" /> : <Moon className="h-4 w-4 text-indigo-400" />}
+          </button>
 
           {/* Settings cog for Admin Setup */}
           <button 
@@ -813,6 +1034,65 @@ export default function App() {
               <Bell className="h-4 w-4 animate-bounce" />
               <span>Simular Alerta</span>
             </button>
+          </div>
+
+          {/* Floating Map Filter Controls */}
+          <div className={`absolute top-4 right-4 z-10 backdrop-blur-md p-3 rounded-2xl shadow-2xl transition-all duration-300 border ${
+            nightMode ? 'bg-zinc-900/95 border-zinc-800' : 'bg-slate-900/95 border-slate-700/60'
+          }`}>
+            <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Filtros de Mapa</h4>
+            <div className="flex flex-col gap-1.5 w-32">
+              <button
+                onClick={() => setFilters(prev => ({ ...prev, transito: !prev.transito }))}
+                className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                  filters.transito 
+                    ? 'bg-amber-500/20 border-amber-500/60 text-amber-300' 
+                    : nightMode 
+                      ? 'bg-zinc-800/40 border-zinc-800/40 text-zinc-600 line-through'
+                      : 'bg-slate-800/40 border-slate-700/40 text-slate-500 line-through'
+                }`}
+              >
+                <div className="flex items-center gap-1">
+                  <span>🚨</span>
+                  <span>Tránsito</span>
+                </div>
+                <div className={`h-2 w-2 rounded-full ${filters.transito ? 'bg-amber-500 animate-pulse' : 'bg-slate-700'}`}></div>
+              </button>
+
+              <button
+                onClick={() => setFilters(prev => ({ ...prev, policia: !prev.policia }))}
+                className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                  filters.policia 
+                    ? 'bg-blue-500/20 border-blue-500/60 text-blue-300' 
+                    : nightMode 
+                      ? 'bg-zinc-800/40 border-zinc-800/40 text-zinc-600 line-through'
+                      : 'bg-slate-800/40 border-slate-700/40 text-slate-500 line-through'
+                }`}
+              >
+                <div className="flex items-center gap-1">
+                  <span>👮</span>
+                  <span>Policía</span>
+                </div>
+                <div className={`h-2 w-2 rounded-full ${filters.policia ? 'bg-blue-500 animate-pulse' : 'bg-slate-700'}`}></div>
+              </button>
+
+              <button
+                onClick={() => setFilters(prev => ({ ...prev, vialidad: !prev.vialidad }))}
+                className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                  filters.vialidad 
+                    ? 'bg-orange-500/20 border-orange-500/60 text-orange-300' 
+                    : nightMode 
+                      ? 'bg-zinc-800/40 border-zinc-800/40 text-zinc-600 line-through'
+                      : 'bg-slate-800/40 border-slate-700/40 text-slate-500 line-through'
+                }`}
+              >
+                <div className="flex items-center gap-1">
+                  <span>🚧</span>
+                  <span>Vialidad</span>
+                </div>
+                <div className={`h-2 w-2 rounded-full ${filters.vialidad ? 'bg-orange-500 animate-pulse' : 'bg-slate-700'}`}></div>
+              </button>
+            </div>
           </div>
 
           {/* Create Point Wizard Modal Overlay */}
@@ -926,44 +1206,71 @@ export default function App() {
 
           {/* Highlighted Marker Detail Panel */}
           {selectedReport && (
-            <div className="absolute bottom-6 left-4 right-4 md:left-6 md:right-auto md:w-96 z-20 bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 p-5 animate-in slide-in-from-bottom">
+            <div className={`absolute bottom-6 left-4 right-4 md:left-6 md:right-auto md:w-96 z-20 rounded-2xl shadow-2xl border p-5 animate-in slide-in-from-bottom transition-colors duration-300 ${
+              nightMode ? 'bg-zinc-900 border-zinc-800 text-zinc-100' : 'bg-slate-800 border-slate-700 text-white'
+            }`}>
               <div className="flex justify-between items-start mb-3">
                 <span className={`px-2.5 py-1 rounded-full text-xs font-extrabold tracking-wide uppercase border ${getReportColor(selectedReport.type)}`}>
                   {getReportLabel(selectedReport.type)}
                 </span>
-                <button 
-                  onClick={() => setSelectedReport(null)}
-                  className="p-1 rounded-full text-slate-400 hover:bg-slate-700"
-                >
-                  <X className="h-4.5 w-4.5" />
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button 
+                    onClick={() => handleShareReport(selectedReport)}
+                    className={`p-1.5 rounded-full transition-colors ${
+                      nightMode ? 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                    }`}
+                    title="Compartir alerta"
+                  >
+                    <Share2 className="h-4 w-4" />
+                  </button>
+                  <button 
+                    onClick={() => setSelectedReport(null)}
+                    className={`p-1.5 rounded-full transition-colors ${
+                      nightMode ? 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                    }`}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
 
-              <h4 className="text-base font-bold text-white mb-1">{selectedReport.locationName}</h4>
-              <p className="text-xs text-slate-400 mb-3">
-                Reportado por <span className="text-slate-200">@{selectedReport.creator}</span> · {new Date(selectedReport.reportedAt).toLocaleTimeString()}
+              <h4 className={`text-base font-bold mb-1 ${nightMode ? 'text-white' : 'text-white'}`}>{selectedReport.locationName}</h4>
+              <p className={`text-xs mb-3 ${nightMode ? 'text-zinc-400' : 'text-slate-400'}`}>
+                Reportado por <span className={nightMode ? 'text-zinc-200' : 'text-slate-200'}>@{selectedReport.creator}</span> · {new Date(selectedReport.reportedAt).toLocaleTimeString()}
               </p>
 
               {selectedReport.description && (
-                <p className="text-xs text-slate-300 bg-slate-900/50 p-2.5 rounded-xl border border-slate-700/50 mb-4 font-mono">
+                <p className={`text-xs p-2.5 rounded-xl border mb-4 font-mono transition-colors duration-300 ${
+                  nightMode ? 'text-zinc-300 bg-zinc-950/50 border-zinc-800' : 'text-slate-300 bg-slate-900/50 border-slate-700/50'
+                }`}>
                   "{selectedReport.description}"
                 </p>
               )}
 
               {/* Voting / Verification Actions */}
-              <div className="border-t border-slate-700/60 pt-4 flex items-center justify-between">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">¿Sigue ahí el retén?</span>
+              <div className={`border-t pt-4 flex items-center justify-between ${
+                nightMode ? 'border-zinc-800' : 'border-slate-700/60'
+              }`}>
+                <span className={`text-[11px] font-bold uppercase tracking-wider ${nightMode ? 'text-zinc-400' : 'text-slate-400'}`}>¿Sigue ahí el retén?</span>
                 <div className="flex gap-2">
                   <button
                     onClick={() => handleVote(selectedReport.id, 'up')}
-                    className="flex items-center gap-1.5 bg-slate-700 hover:bg-emerald-600/30 hover:text-emerald-400 border border-slate-600/80 px-3 py-1.5 rounded-lg text-xs font-bold transition"
+                    className={`flex items-center gap-1.5 border px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                      nightMode 
+                        ? 'bg-zinc-800 border-zinc-700 hover:bg-emerald-600/30 hover:text-emerald-400' 
+                        : 'bg-slate-700 border-slate-600/80 hover:bg-emerald-600/30 hover:text-emerald-400'
+                    }`}
                   >
                     <Check className="h-3.5 w-3.5 text-emerald-400" />
                     <span>Sí ({selectedReport.votesUp || 0})</span>
                   </button>
                   <button
                     onClick={() => handleVote(selectedReport.id, 'down')}
-                    className="flex items-center gap-1.5 bg-slate-700 hover:bg-rose-600/30 hover:text-rose-400 border border-slate-600/80 px-3 py-1.5 rounded-lg text-xs font-bold transition"
+                    className={`flex items-center gap-1.5 border px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                      nightMode 
+                        ? 'bg-zinc-800 border-zinc-700 hover:bg-rose-600/30 hover:text-rose-400' 
+                        : 'bg-slate-700 border-slate-600/80 hover:bg-rose-600/30 hover:text-rose-400'
+                    }`}
                   >
                     <X className="h-3.5 w-3.5 text-rose-400" />
                     <span>No ({selectedReport.votesDown || 0})</span>
@@ -975,12 +1282,16 @@ export default function App() {
         </div>
 
         {/* RECENT ALERTS FEED TAB (Mobile / Sidebar Layout) */}
-        <div className={`w-full md:w-96 md:border-l border-slate-700/80 bg-slate-900 flex flex-col shrink-0 min-h-0 ${
+        <div className={`w-full md:w-96 md:border-l flex flex-col shrink-0 min-h-0 transition-colors duration-300 ${
           activeTab !== 'map' ? 'flex' : 'hidden md:flex'
+        } ${
+          nightMode ? 'border-zinc-800/80 bg-zinc-950' : 'border-slate-700/80 bg-slate-900'
         }`}>
           
           {/* Section Selector */}
-          <div className="flex border-b border-slate-700/60 bg-slate-800/40 p-2 gap-1 shrink-0 overflow-x-auto select-none">
+          <div className={`flex border-b p-2 gap-1 shrink-0 overflow-x-auto select-none transition-colors duration-300 ${
+            nightMode ? 'border-zinc-800 bg-zinc-900/40' : 'border-slate-700/60 bg-slate-800/40'
+          }`}>
             <button
               onClick={() => setActiveTab('map')}
               className={`flex-1 md:hidden py-2 px-1.5 rounded-xl text-[10px] sm:text-xs font-bold flex items-center justify-center gap-1 shrink-0 transition ${
@@ -1000,7 +1311,10 @@ export default function App() {
               <span>Lista</span>
             </button>
             <button
-              onClick={() => setActiveTab('stats')}
+              onClick={() => {
+                setActiveTab('stats');
+                fetchLeaderboard();
+              }}
               className={`flex-1 py-2 px-1.5 rounded-xl text-[10px] sm:text-xs font-bold flex items-center justify-center gap-1 shrink-0 transition ${
                 activeTab === 'stats' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'
               }`}
@@ -1091,6 +1405,79 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+
+                {/* Community Leaderboard */}
+                <div className="space-y-3 pt-3 border-t border-slate-700/40">
+                  <div className="flex items-center gap-1.5">
+                    <Award className="h-4.5 w-4.5 text-amber-400 animate-pulse" />
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Líderes de la Comunidad</h4>
+                  </div>
+                  
+                  {leaderboard.length === 0 ? (
+                    <p className="text-xs text-slate-500 text-center py-2">Cargando tabla de clasificación...</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {leaderboard.map((item, index) => {
+                        const isSelf = user && item.username === user.username;
+                        const rank = index + 1;
+                        let rankBadge = '';
+                        let rankStyle = '';
+                        
+                        if (rank === 1) {
+                          rankBadge = '🥇';
+                          rankStyle = 'text-amber-400 font-black';
+                        } else if (rank === 2) {
+                          rankBadge = '🥈';
+                          rankStyle = 'text-slate-300 font-black';
+                        } else if (rank === 3) {
+                          rankBadge = '🥉';
+                          rankStyle = 'text-amber-600 font-black';
+                        } else {
+                          rankBadge = `#${rank}`;
+                          rankStyle = 'text-slate-500 font-bold font-mono';
+                        }
+
+                        return (
+                          <div 
+                            key={item.username} 
+                            className={`flex items-center justify-between p-3 rounded-2xl border transition-colors duration-300 ${
+                              isSelf 
+                                ? 'bg-blue-600/15 border-blue-500/40 shadow-inner' 
+                                : nightMode 
+                                  ? 'bg-zinc-900/40 border-zinc-800' 
+                                  : 'bg-slate-800/20 border-slate-700/30'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <span className={`text-sm select-none shrink-0 w-6 text-center ${rankStyle}`}>
+                                {rankBadge}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1">
+                                  <span className={`text-xs font-black truncate text-slate-100 ${isSelf ? 'text-blue-400' : ''}`}>
+                                    {item.name}
+                                  </span>
+                                  {isSelf && (
+                                    <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1 py-0.2 rounded font-extrabold uppercase font-mono tracking-wider">
+                                      Tú
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-[10px] text-slate-500 block truncate">@{item.username}</span>
+                              </div>
+                            </div>
+                            <span className="text-xs font-black text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20 shrink-0 font-mono">
+                              {item.trustPoints} pts
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-slate-500 text-center leading-relaxed">
+                    Suma <strong className="text-slate-400">Puntos de Confianza</strong> reportando controles y recibiendo confirmaciones de otros ciudadanos. ¡Colabora con la seguridad vial!
+                  </p>
+                </div>
               </div>
             )}
 
@@ -1178,24 +1565,184 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Notification Preferences Card */}
+                    <div className={`p-5 rounded-2xl border transition-colors duration-300 ${
+                      nightMode ? 'bg-zinc-900/60 border-zinc-800' : 'bg-slate-800/80 border-slate-700 shadow-lg'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-4">
+                        <Bell className="h-4.5 w-4.5 text-blue-400 animate-bounce" />
+                        <h4 className="text-xs font-bold text-white uppercase tracking-wider">Alertas por Proximidad</h4>
+                      </div>
+
+                      <div className="space-y-4">
+                        {/* Range Distance Slider */}
+                        <div>
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-[11px] text-slate-400 font-bold uppercase">Radio de Cobertura</span>
+                            <span className="text-xs font-black text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-lg">
+                              {notifDistance} km
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.5"
+                            max="5.0"
+                            step="0.5"
+                            value={notifDistance}
+                            onChange={(e) => setNotifDistance(parseFloat(e.target.value))}
+                            className="w-full h-1.5 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                          <p className="text-[10px] text-slate-500 mt-1">
+                            Recibirás notificaciones nativas en segundo plano cuando te aproximes a un retén dentro de este radio.
+                          </p>
+                        </div>
+
+                        {/* Allowed Types Checkboxes */}
+                        <div className="border-t border-slate-700/50 pt-3">
+                          <span className="text-[11px] text-slate-400 font-bold uppercase block mb-2">Tipos de Alerta Permitidos</span>
+                          <div className="grid grid-cols-1 gap-2.5">
+                            <label className="flex items-center gap-2.5 cursor-pointer group">
+                              <input
+                                type="checkbox"
+                                checked={notifTypes.transito}
+                                onChange={(e) => setNotifTypes(prev => ({ ...prev, transito: e.target.checked }))}
+                                className="h-4 w-4 bg-slate-900 border-slate-700 rounded text-blue-600 accent-blue-500 focus:ring-0 cursor-pointer"
+                              />
+                              <span className="text-xs text-slate-300 group-hover:text-white transition">🚨 Control de Tránsito</span>
+                            </label>
+                            <label className="flex items-center gap-2.5 cursor-pointer group">
+                              <input
+                                type="checkbox"
+                                checked={notifTypes.policia}
+                                onChange={(e) => setNotifTypes(prev => ({ ...prev, policia: e.target.checked }))}
+                                className="h-4 w-4 bg-slate-900 border-slate-700 rounded text-blue-600 accent-blue-500 focus:ring-0 cursor-pointer"
+                              />
+                              <span className="text-xs text-slate-300 group-hover:text-white transition">👮 Control Policial</span>
+                            </label>
+                            <label className="flex items-center gap-2.5 cursor-pointer group">
+                              <input
+                                type="checkbox"
+                                checked={notifTypes.vialidad}
+                                onChange={(e) => setNotifTypes(prev => ({ ...prev, vialidad: e.target.checked }))}
+                                className="h-4 w-4 bg-slate-900 border-slate-700 rounded text-blue-600 accent-blue-500 focus:ring-0 cursor-pointer"
+                              />
+                              <span className="text-xs text-slate-300 group-hover:text-white transition">🚧 Vialidad / Obras</span>
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Contribution activity */}
                     <div>
-                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Tus Aportaciones</h4>
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Historial de tus Reportes</h4>
                       {reports.filter(r => r.creator === user.username).length === 0 ? (
                         <p className="text-xs text-slate-500 text-center py-4">Aún no has reportado ningún retén. ¡Ayuda a tu comunidad alertando controles!</p>
                       ) : (
-                        <div className="space-y-2">
+                        <div className="space-y-3">
                           {reports.filter(r => r.creator === user.username).map((report) => (
-                            <div key={report.id} className="bg-slate-800/40 border border-slate-700/40 p-3 rounded-xl text-xs">
-                              <div className="flex justify-between mb-1">
-                                <span className="font-bold text-slate-200">{report.locationName}</span>
-                                <span className="text-slate-500">{new Date(report.reportedAt).toLocaleDateString()}</span>
-                              </div>
-                              <p className="text-slate-400 text-[11px] mb-1">Tipo: {getReportLabel(report.type)}</p>
-                              <div className="flex gap-3 text-[10px] text-slate-500">
-                                <span className="text-emerald-500 font-medium">{report.votesUp} Confirmados</span>
-                                <span className="text-rose-500 font-medium">{report.votesDown} Descartados</span>
-                              </div>
+                            <div key={report.id} className={`p-4 rounded-2xl border transition-colors duration-300 ${
+                              nightMode ? 'bg-zinc-900/60 border-zinc-800' : 'bg-slate-800/40 border-slate-700/40'
+                            }`}>
+                              {editingReportId === report.id ? (
+                                <div className="space-y-3">
+                                  <div>
+                                    <label className="text-[10px] uppercase font-bold text-slate-400">Ubicación</label>
+                                    <input
+                                      type="text"
+                                      value={editForm.locationName}
+                                      onChange={(e) => setEditForm(prev => ({ ...prev, locationName: e.target.value }))}
+                                      className="w-full mt-1 px-3 py-1.5 rounded-xl text-xs bg-slate-900 text-white border border-slate-700"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] uppercase font-bold text-slate-400">Tipo de Control</label>
+                                    <select
+                                      value={editForm.type}
+                                      onChange={(e) => setEditForm(prev => ({ ...prev, type: e.target.value as any }))}
+                                      className="w-full mt-1 px-3 py-1.5 rounded-xl text-xs bg-slate-900 text-white border border-slate-700"
+                                    >
+                                      <option value="transito">🚨 Control de Tránsito</option>
+                                      <option value="policia">👮 Control Policial</option>
+                                      <option value="vialidad">🚧 Vialidad / Obras</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] uppercase font-bold text-slate-400">Descripción (Opcional)</label>
+                                    <textarea
+                                      value={editForm.description}
+                                      onChange={(e) => setEditForm(prev => ({ ...prev, description: e.target.value }))}
+                                      rows={2}
+                                      className="w-full mt-1 px-3 py-1.5 rounded-xl text-xs bg-slate-900 text-white border border-slate-700 font-mono"
+                                      placeholder="Agrega una descripción..."
+                                    />
+                                  </div>
+                                  <div className="flex gap-2 justify-end pt-1">
+                                    <button
+                                      onClick={() => setEditingReportId(null)}
+                                      className="px-3 py-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition"
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      onClick={() => handleSaveEdit(report.id)}
+                                      className="px-4 py-1.5 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white transition shadow-md"
+                                    >
+                                      Guardar Cambios
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div>
+                                  <div className="flex justify-between items-start gap-2 mb-2">
+                                    <div className="space-y-1">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className={`px-2 py-0.5 rounded-md text-[9px] font-extrabold uppercase tracking-wider border ${getReportColor(report.type)}`}>
+                                          {getReportLabel(report.type)}
+                                        </span>
+                                        <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider ${
+                                          report.status === 'Activo' 
+                                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                        }`}>
+                                          {report.status}
+                                        </span>
+                                      </div>
+                                      <span className="font-extrabold text-white text-xs block">{report.locationName}</span>
+                                    </div>
+                                    <span className="text-[10px] text-slate-500 shrink-0 font-medium">
+                                      {new Date(report.reportedAt).toLocaleDateString()}
+                                    </span>
+                                  </div>
+
+                                  {report.description && (
+                                    <p className="text-[11px] text-slate-400 bg-slate-900/40 p-2 rounded-lg border border-slate-700/20 mb-2 font-mono">
+                                      "{report.description}"
+                                    </p>
+                                  )}
+
+                                  <div className="flex items-center justify-between text-[10px] text-slate-500 pt-2 border-t border-slate-700/20 mt-2">
+                                    <div className="flex gap-2.5">
+                                      <span className="text-emerald-500 font-medium">✔️ {report.votesUp || 0} confirmados</span>
+                                      <span className="text-rose-500 font-medium">❌ {report.votesDown || 0} despejados</span>
+                                    </div>
+                                    <div className="flex gap-1.5">
+                                      <button
+                                        onClick={() => handleStartEdit(report)}
+                                        className="px-2.5 py-1 rounded-lg bg-blue-600/10 text-blue-400 border border-blue-500/10 hover:bg-blue-600/20 transition-all font-bold text-[10px]"
+                                      >
+                                        Editar
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeleteReport(report.id)}
+                                        className="px-2.5 py-1 rounded-lg bg-rose-600/10 text-rose-400 border border-rose-500/10 hover:bg-rose-600/20 transition-all font-bold text-[10px]"
+                                      >
+                                        Eliminar
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1222,6 +1769,27 @@ export default function App() {
                     </div>
                   </div>
                 )}
+
+                {/* Quick Guide Card */}
+                <div 
+                  onClick={() => {
+                    setGuideStep(1);
+                    setShowQuickGuide(true);
+                  }}
+                  className={`p-4 rounded-2xl border text-left cursor-pointer transition mt-4 ${
+                    nightMode 
+                      ? 'bg-zinc-900/60 border-zinc-800 hover:bg-zinc-800/80 hover:border-zinc-700' 
+                      : 'bg-slate-800/40 border-slate-700/60 hover:bg-slate-800 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <Compass className="h-4.5 w-4.5 text-blue-400 animate-pulse" />
+                    <h4 className="text-xs font-bold text-white">Guía Rápida Vial</h4>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Aprende cómo alertar un retén, utilizar los filtros de mapa y operar en el modo sin conexión en cualquier momento.
+                  </p>
+                </div>
               </div>
             )}
           </div>
@@ -1496,6 +2064,133 @@ export default function App() {
             >
               Cerrar Instrucciones
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* QUICK ONBOARDING GUIDE MODAL OVERLAY */}
+      {showQuickGuide && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className={`w-full max-w-md rounded-3xl p-6 shadow-2xl border transition-colors duration-300 ${
+            nightMode ? 'bg-zinc-900 border-zinc-800 text-zinc-100' : 'bg-slate-800 border-slate-700 text-white'
+          }`}>
+            {/* Header */}
+            <div className="flex justify-between items-center mb-6">
+              <span className="text-[10px] bg-blue-600/20 text-blue-400 font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider font-mono">
+                Guía Rápida · Paso {guideStep} de 3
+              </span>
+              <button 
+                onClick={() => {
+                  localStorage.setItem('has_seen_guide', 'true');
+                  setShowQuickGuide(false);
+                }}
+                className={`p-1.5 rounded-xl transition-colors ${
+                  nightMode ? 'text-zinc-400 hover:bg-zinc-800 hover:text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                }`}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Step Contents */}
+            <div className="min-h-[220px] flex flex-col justify-center py-2">
+              {guideStep === 1 && (
+                <div className="space-y-4 animate-in fade-in zoom-in-95 duration-300">
+                  <div className="h-16 w-16 bg-rose-500/10 border border-rose-500/20 rounded-2xl flex items-center justify-center text-3xl shadow-inner">
+                    🚨
+                  </div>
+                  <h3 className="text-lg font-black tracking-tight text-white">1. Cómo reportar un retén</h3>
+                  <p className={`text-xs leading-relaxed ${nightMode ? 'text-zinc-400' : 'text-slate-300'}`}>
+                    Para alertar sobre un nuevo control de seguridad en tiempo real, simplemente <strong className="text-white">toca cualquier parte del mapa</strong>. 
+                  </p>
+                  <p className={`text-xs leading-relaxed ${nightMode ? 'text-zinc-400' : 'text-slate-300'}`}>
+                    Se abrirá un asistente para elegir el tipo de control (Tránsito, Policía o Vialidad), agregar detalles y enviar el reporte de forma inmediata.
+                  </p>
+                </div>
+              )}
+
+              {guideStep === 2 && (
+                <div className="space-y-4 animate-in fade-in zoom-in-95 duration-300">
+                  <div className="h-16 w-16 bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center justify-center text-3xl shadow-inner">
+                    🔍
+                  </div>
+                  <h3 className="text-lg font-black tracking-tight text-white">2. Filtrar por categoría</h3>
+                  <p className={`text-xs leading-relaxed ${nightMode ? 'text-zinc-400' : 'text-slate-300'}`}>
+                    ¿Quieres ver solo controles policiales o evitar obras viales? Utiliza el nuevo <strong className="text-white">Panel de Filtros de Mapa</strong> flotante ubicado en la esquina superior derecha.
+                  </p>
+                  <p className={`text-xs leading-relaxed ${nightMode ? 'text-zinc-400' : 'text-slate-300'}`}>
+                    Toca cada categoría para activar o desactivar su visibilidad en el mapa al instante.
+                  </p>
+                </div>
+              )}
+
+              {guideStep === 3 && (
+                <div className="space-y-4 animate-in fade-in zoom-in-95 duration-300">
+                  <div className="h-16 w-16 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center text-3xl shadow-inner">
+                    📶
+                  </div>
+                  <h3 className="text-lg font-black tracking-tight text-white">3. Funcionamiento Offline</h3>
+                  <p className={`text-xs leading-relaxed ${nightMode ? 'text-zinc-400' : 'text-slate-300'}`}>
+                    RetenAlerta funciona <strong className="text-white">sin conexión a internet</strong>. Podrás seguir viendo el mapa y los reportes almacenados en caché.
+                  </p>
+                  <p className={`text-xs leading-relaxed ${nightMode ? 'text-zinc-400' : 'text-slate-300'}`}>
+                    Si creas un reporte sin cobertura, este se guardará en tu cola de espera y se sincronizará automáticamente con Google Sheets y el servidor en cuanto recuperes la señal.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Stepper Footer */}
+            <div className={`mt-8 pt-4 border-t flex items-center justify-between ${
+              nightMode ? 'border-zinc-800' : 'border-slate-700/50'
+            }`}>
+              {/* Dots indicator */}
+              <div className="flex gap-1.5">
+                {[1, 2, 3].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setGuideStep(s)}
+                    className={`h-2 rounded-full transition-all duration-300 ${
+                      guideStep === s ? 'w-6 bg-blue-500' : 'w-2 bg-slate-600'
+                    }`}
+                  />
+                ))}
+              </div>
+
+              {/* Navigation buttons */}
+              <div className="flex gap-2">
+                {guideStep > 1 && (
+                  <button
+                    onClick={() => setGuideStep(prev => prev - 1)}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+                      nightMode ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-750' : 'bg-slate-700 text-slate-200 hover:bg-slate-600'
+                    }`}
+                  >
+                    Atrás
+                  </button>
+                )}
+                
+                {guideStep < 3 ? (
+                  <button
+                    onClick={() => setGuideStep(prev => prev + 1)}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white transition flex items-center gap-1 shadow-md"
+                  >
+                    <span>Siguiente</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      localStorage.setItem('has_seen_guide', 'true');
+                      setShowQuickGuide(false);
+                    }}
+                    className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition shadow-md"
+                  >
+                    ¡Empezar!
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
